@@ -180,10 +180,15 @@ def refine(prompt: str) -> str:
 
 
 def _strip_meta(text: str) -> str:
-    """모델이 출력한 메타 텍스트(머리말/구분선)를 제거."""
+    """<REFINED> 태그 안의 내용만 추출. 태그가 없으면 기존 폴백 로직 사용."""
+    # 1차: <REFINED> 태그 추출
+    match = re.search(r"<REFINED>\s*\n?(.*?)\s*</REFINED>", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+
+    # 폴백: 태그 없이 출력된 경우 앞쪽 메타 라인 제거
     lines = text.split("\n")
 
-    # 앞쪽 메타 라인 제거
     meta_patterns = re.compile(
         r"^("
         r"-{2,}|"                           # --- 구분선
