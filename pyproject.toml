@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "haedong"
+version = "0.1.0"
+description = "당신의 클로드 코드가 더 명료하게 일하도록 합니다"
+requires-python = ">=3.9"
+dependencies = [
+    "rich>=13.0",
+]
+
+[tool.setuptools]
+py-modules = ["main", "refiner"]
+
+[project.scripts]
+haedong = "main:main"

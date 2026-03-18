@@ -1,0 +1,2 @@
+[console_scripts]
+haedong = main:main

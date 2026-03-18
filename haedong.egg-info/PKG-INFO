@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: haedong
+Version: 0.1.0
+Summary: 당신의 클로드 코드가 더 명료하게 일하도록 합니다
+Requires-Python: >=3.9
+Requires-Dist: rich>=13.0
