@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import patch, MagicMock
-from agent import Agent, DEFAULT_MODEL, _parse_tool_calls
+from agent import Agent, DEFAULT_MODEL, _parse_tool_calls, _separate_thinking, _ThinkingFilter
 
 
 class TestParseToolCalls(unittest.TestCase):
@@ -207,6 +207,105 @@ class TestAgentConnection(unittest.TestCase):
         agent = Agent(base_url="http://localhost:1234/v1")
         models = agent.list_models()
         self.assertEqual(models, ["qwen3-vl-8b", "gpt-oss-20b"])
+
+
+class TestSeparateThinking(unittest.TestCase):
+    """<think> 태그 분리 테스트."""
+
+    def test_with_thinking(self):
+        text = "<think>\n이건 사고 과정\n</think>\n실제 응답"
+        thinking, response = _separate_thinking(text)
+        self.assertEqual(thinking, "이건 사고 과정")
+        self.assertEqual(response, "실제 응답")
+
+    def test_without_thinking(self):
+        text = "사고 과정 없는 응답"
+        thinking, response = _separate_thinking(text)
+        self.assertEqual(thinking, "")
+        self.assertEqual(response, "사고 과정 없는 응답")
+
+    def test_empty_thinking(self):
+        text = "<think></think>응답만"
+        thinking, response = _separate_thinking(text)
+        self.assertEqual(thinking, "")
+        self.assertEqual(response, "응답만")
+
+    def test_multiline_thinking(self):
+        text = "<think>\nline1\nline2\nline3\n</think>\n결과"
+        thinking, response = _separate_thinking(text)
+        self.assertIn("line1", thinking)
+        self.assertIn("line3", thinking)
+        self.assertEqual(response, "결과")
+
+
+class TestThinkingFilter(unittest.TestCase):
+    """스트리밍 thinking 필터 테스트."""
+
+    def test_thinking_then_response(self):
+        """<think>...</think> 후 응답이 오는 정상 케이스."""
+        text_chunks = []
+        think_chunks = []
+
+        filt = _ThinkingFilter(
+            on_text=lambda t: text_chunks.append(t),
+            on_thinking=lambda t: think_chunks.append(t),
+        )
+
+        for token in ["<think>", "사고 ", "과정", "</think>", "\n응답 ", "텍스트"]:
+            filt.feed(token)
+
+        self.assertTrue(len(think_chunks) > 0)
+        self.assertIn("응답", "".join(text_chunks))
+        self.assertNotIn("<think>", "".join(text_chunks))
+
+    def test_no_thinking(self):
+        """thinking 없이 바로 응답."""
+        text_chunks = []
+        think_chunks = []
+
+        filt = _ThinkingFilter(
+            on_text=lambda t: text_chunks.append(t),
+            on_thinking=lambda t: think_chunks.append(t),
+        )
+
+        for token in ["안녕", "하세요", "!!"]:
+            filt.feed(token)
+
+        self.assertEqual(think_chunks, [])
+        self.assertEqual("".join(text_chunks), "안녕하세요!!")
+
+    def test_split_tag_across_tokens(self):
+        """<think> 태그가 토큰 경계에서 분리되는 경우."""
+        text_chunks = []
+        think_chunks = []
+
+        filt = _ThinkingFilter(
+            on_text=lambda t: text_chunks.append(t),
+            on_thinking=lambda t: think_chunks.append(t),
+        )
+
+        for token in ["<", "think>", "생각중", "</", "think>", "결과"]:
+            filt.feed(token)
+
+        self.assertTrue(len(think_chunks) > 0)
+        self.assertIn("결과", "".join(text_chunks))
+
+    def test_thinking_stored_in_agent(self):
+        """Agent.last_thinking에 사고 과정이 저장되는지 확인."""
+        agent = Agent(base_url="http://localhost:1234/v1")
+
+        thinking_resp = _mock_streaming_response([
+            "<think>\n분석 중...\n</think>\n",
+            "최종 답변입니다.",
+        ])
+        mock_post = MagicMock()
+        mock_post.return_value = thinking_resp
+
+        with patch("requests.post", mock_post):
+            result = agent.chat("테스트")
+
+        self.assertEqual(result, "최종 답변입니다.")
+        self.assertIn("분석 중", agent.last_thinking)
 
 
 if __name__ == "__main__":

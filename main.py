@@ -11,6 +11,8 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.markdown import Markdown
 from rich.live import Live
+from rich.panel import Panel
+from rich.text import Text
 from agent import Agent
 
 console = Console()
@@ -39,6 +41,7 @@ def print_intro(model: str, mode: str):
     console.print(f"  [dim]프로젝트[/]  [bold]{os.path.basename(cwd)}/[/]")
     console.print(f"  [dim]종료    [/]  [dim]q · Ctrl+C[/]")
     console.print(f"  [dim]초기화  [/]  [dim]/reset[/]")
+    console.print(f"  [dim]사고확인[/]  [dim]/think[/]")
     console.print()
 
 
@@ -167,6 +170,19 @@ def main():
                 agent.reset()
                 console.print("  [dim]대화가 초기화되었습니다.[/]\n")
                 continue
+            if stripped == "/think":
+                if agent.last_thinking:
+                    console.print(Panel(
+                        Text(agent.last_thinking, style="dim"),
+                        title="[bold]💭 사고 과정[/]",
+                        border_style="dim",
+                        expand=False,
+                        padding=(1, 2),
+                    ))
+                else:
+                    console.print("  [dim]표시할 사고 과정이 없습니다.[/]")
+                console.print()
+                continue
             if stripped == "/model":
                 models = agent.list_models()
                 console.print(f"  [dim]현재 모델:[/] [bold]{agent.model}[/]")
@@ -195,8 +211,16 @@ def main():
 
             # 스트리밍: Live 디스플레이로 마크다운 실시간 렌더링
             response_chunks = []
+            thinking_line_count = [0]
 
             with Live(console=console, refresh_per_second=8, vertical_overflow="visible") as live:
+                def on_thinking(chunk):
+                    thinking_line_count[0] += chunk.count("\n")
+                    live.update(Text(
+                        f"  💭 사고 중... ({thinking_line_count[0] + 1}줄)",
+                        style="dim italic",
+                    ))
+
                 def on_text(chunk):
                     response_chunks.append(chunk)
                     accumulated = "".join(response_chunks)
@@ -209,11 +233,20 @@ def main():
                     user_input.strip(),
                     on_text=on_text,
                     on_tool=on_tool_use,
+                    on_thinking=on_thinking,
                 )
 
             # 스트리밍이 아닌 경우 최종 마크다운 출력
             if not agent._streamed:
                 console.print(Markdown(response))
+
+            # 사고 과정 요약 표시
+            if agent.last_thinking and thinking_line_count[0] > 0:
+                lines = agent.last_thinking.count("\n") + 1
+                console.print(
+                    f"  [dim]💭 사고 과정 ({lines}줄)"
+                    f" — /think 입력으로 확인[/]"
+                )
 
             console.print()
 
