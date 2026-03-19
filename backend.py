@@ -55,16 +55,18 @@ class LocalLLM:
             raise RuntimeError("모델이 로드되지 않았습니다. load()를 먼저 호출하세요.")
 
         from mlx_lm import stream_generate
+        from mlx_lm.sample_utils import make_sampler
 
         prompt = self.tokenizer.apply_chat_template(
             messages, add_generation_prompt=True
         )
 
+        sampler = make_sampler(temp=temperature)
         for response in stream_generate(
             self.model, self.tokenizer,
             prompt=prompt,
             max_tokens=max_tokens,
-            temp=temperature,
+            sampler=sampler,
         ):
             yield response.text
 
