@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """프롬프트 개선기 - Claude Code를 활용해 당신의 클로드 코드가 더 명료하게 일하도록 합니다. 변환"""
 
-import json
 import random
-import sys
 import threading
 from rich.console import Console
 from rich.panel import Panel
@@ -87,78 +85,6 @@ LOADING_MESSAGES = [
     "✦ 거의 다 됐어, 마무리 중...",
 ]
 
-def stream_output(proc):
-    """stream-json 이벤트를 파싱해서 실시간으로 표시."""
-    for raw_line in proc.stdout:
-        raw_line = raw_line.strip()
-        if not raw_line:
-            continue
-        try:
-            event = json.loads(raw_line)
-        except json.JSONDecodeError:
-            continue
-
-        event_type = event.get("type", "")
-
-        # 텍스트 스트리밍 (토큰 단위)
-        if event_type == "stream_event":
-            delta = event.get("event", {}).get("delta", {})
-            if delta.get("type") == "text_delta":
-                sys.stdout.write(delta.get("text", ""))
-                sys.stdout.flush()
-
-        # 도구 사용 시작
-        elif event_type == "assistant":
-            message = event.get("message", {})
-            if isinstance(message, dict):
-                for block in message.get("content", []):
-                    if block.get("type") == "tool_use":
-                        tool = block.get("name", "")
-                        inp = block.get("input", {})
-                        _print_tool_use(tool, inp)
-
-        # 도구 실행 결과
-        elif event_type == "tool_result":
-            pass  # 결과는 너무 길 수 있으니 생략
-
-        # 최종 결과
-        elif event_type == "result":
-            console.print()  # 마지막 줄바꿈
-
-    proc.wait()
-    if proc.returncode != 0:
-        err = proc.stderr.read()
-        if err.strip():
-            console.print(f"\n  [bold red]✗ 실행 오류:[/] {err}\n")
-    console.print()
-
-
-def _print_tool_use(tool: str, inp: dict):
-    """도구 호출을 한 줄로 표시."""
-    if tool == "Read":
-        path = inp.get("file_path", "")
-        console.print(f"  [dim]📖 Read → {path}[/]")
-    elif tool == "Edit":
-        path = inp.get("file_path", "")
-        console.print(f"  [dim]✏️  Edit → {path}[/]")
-    elif tool == "Write":
-        path = inp.get("file_path", "")
-        console.print(f"  [dim]📝 Write → {path}[/]")
-    elif tool == "Bash":
-        cmd = inp.get("command", "")
-        if len(cmd) > 80:
-            cmd = cmd[:77] + "..."
-        console.print(f"  [dim]💻 Bash → {cmd}[/]")
-    elif tool == "Glob":
-        pattern = inp.get("pattern", "")
-        console.print(f"  [dim]🔍 Glob → {pattern}[/]")
-    elif tool == "Grep":
-        pattern = inp.get("pattern", "")
-        console.print(f"  [dim]🔍 Grep → {pattern}[/]")
-    else:
-        console.print(f"  [dim]🔧 {tool}[/]")
-
-
 def refine_with_progress(original: str) -> str:
     result_holder = {}
     error_holder = {}
@@ -213,14 +139,11 @@ def main():
                 continue
             display(original, refined)
 
-            # Opus로 실행
-            console.print("  [bold cyan]⚡ Opus로 실행 중...[/]\n")
-            proc = execute(refined)
-            try:
-                stream_output(proc)
-            except KeyboardInterrupt:
-                proc.terminate()
-                console.print("\n  [dim]실행 중단됨[/]\n")
+            # Opus 대화형 실행 — 터미널을 Claude에게 넘김
+            console.print("\n  [bold cyan]⚡ Opus 대화형 세션 시작[/]\n")
+            returncode = execute(refined)
+            if returncode != 0:
+                console.print(f"\n  [bold red]✗ Claude 종료 코드: {returncode}[/]\n")
         except (KeyboardInterrupt, EOFError):
             console.print("\n")
             break

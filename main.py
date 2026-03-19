@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""프롬프트 개선기 - Claude Code를 활용해 당신의 클로드 코드가 더 명료하게 일하도록 합니다. 변환"""
+"""해동 코드 - 로컬 VL 모델 기반 코딩 에이전트.
 
-import random
-import threading
-from rich.console import Console
-from rich.panel import Panel
-from rich.columns import Columns
-from rich.text import Text
-from rich.prompt import Prompt
-from rich.spinner import Spinner
-from rich.live import Live
+기본: 내장 Qwen3-VL 모델 (Apple Silicon MLX)
+옵션: --url 플래그로 외부 API 서버 사용
+"""
+
 import os
-from refiner import refine, execute
+import sys
+from rich.console import Console
+from rich.prompt import Prompt
+from rich.markdown import Markdown
+from rich.live import Live
+from agent import Agent
 
 console = Console()
 
@@ -24,129 +24,207 @@ LOGO = r"""
 [bold cyan]  ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═════╝  ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝[/]
 [bold white]             ┄┄┄  해 동  코 드  ┄┄┄[/]"""
 
-
-def print_intro():
+def print_intro(model: str, mode: str):
     cwd = os.getcwd()
-
     console.print()
     console.print(LOGO)
     console.print()
     console.print(
         "  [bold white on cyan]  ✦ 해동 코드  [/]"
-        "  [dim]당신의 클로드 코드가 더 명료하게 일하도록 합니다.[/]"
+        "  [dim]로컬 코딩 에이전트[/]"
     )
     console.print()
+    console.print(f"  [dim]모드    [/]  [bold]{mode}[/]")
+    console.print(f"  [dim]모델    [/]  [bold]{model}[/]")
     console.print(f"  [dim]프로젝트[/]  [bold]{os.path.basename(cwd)}/[/]")
     console.print(f"  [dim]종료    [/]  [dim]q · Ctrl+C[/]")
+    console.print(f"  [dim]초기화  [/]  [dim]/reset[/]")
     console.print()
 
 
-def display(original: str, refined: str):
-    orig_len = len(original)
-    new_len = len(refined)
-    diff = orig_len - new_len
-
-    before = Panel(
-        Text(original, style="white"),
-        title="[bold red]✗ BEFORE[/]",
-        border_style="dim red",
-        padding=(1, 2),
-        expand=True,
-    )
-
-    after = Panel(
-        Text(refined, style="white"),
-        title="[bold cyan]✓ AFTER[/]",
-        border_style="dim cyan",
-        padding=(1, 2),
-        expand=True,
-    )
-
+def confirm_tool(tool_name: str, args: dict) -> bool:
+    """위험 도구 실행 전 사용자 확인."""
     console.print()
-    console.print(Columns([before, after], equal=True, padding=(0, 1)))
 
-    if diff > 0:
-        ratio = diff / orig_len * 100
-        console.print(
-            f"  [dim]📊 {orig_len}자 → {new_len}자[/]  [bold cyan](-{ratio:.0f}%)[/]",
-        )
+    if tool_name == "write_file":
+        desc = f"  [bold yellow]⚠ 파일 쓰기:[/] {args.get('path', '?')}"
+    elif tool_name == "edit_file":
+        desc = f"  [bold yellow]⚠ 파일 수정:[/] {args.get('path', '?')}"
+    elif tool_name == "run_command":
+        desc = f"  [bold yellow]⚠ 명령 실행:[/] {args.get('command', '?')}"
+    elif tool_name == "git_commit":
+        desc = f"  [bold yellow]⚠ Git 커밋:[/] {args.get('message', '?')}"
     else:
-        console.print(f"  [dim]📊 {orig_len}자 → {new_len}자[/]")
-    console.print()
+        desc = f"  [bold yellow]⚠ {tool_name}[/]"
+
+    console.print(desc)
+    try:
+        answer = Prompt.ask("  [dim]실행할까요?[/]", choices=["y", "n"], default="y")
+        return answer == "y"
+    except (KeyboardInterrupt, EOFError):
+        return False
 
 
-LOADING_MESSAGES = [
-    "✦ 프로젝트 구조를 살펴보는 중...",
-    "✦ 소스코드를 꼼꼼히 읽는 중...",
-    "✦ 프롬프트를 이 프로젝트에 맞게 맛있게 바꾸는 중...",
-    "✦ 모호한 표현을 콕콕 찍어내는 중...",
-    "✦ 어떤 파일을 건드려야 할지 추리하는 중...",
-    "✦ AI가 바로 실행할 수 있게 다듬는 중...",
-    "✦ 거의 다 됐어, 마무리 중...",
-]
+def on_tool_use(tool_name: str, args: dict, result: str):
+    """도구 사용 시 표시."""
+    icon_map = {
+        "read_file": "📖", "write_file": "✏️", "edit_file": "🔧",
+        "list_files": "📁", "search_files": "🔍", "run_command": "💻",
+        "git_status": "📊", "git_diff": "📝", "git_commit": "✅", "git_log": "📜",
+    }
+    icon = icon_map.get(tool_name, "🔧")
 
-def refine_with_progress(original: str) -> str:
-    result_holder = {}
-    error_holder = {}
+    if tool_name in ("read_file", "write_file", "edit_file"):
+        detail = args.get("path", "")
+    elif tool_name in ("list_files", "search_files"):
+        detail = args.get("pattern", "")
+    elif tool_name == "run_command":
+        detail = args.get("command", "")
+    elif tool_name == "git_commit":
+        detail = args.get("message", "")
+    else:
+        detail = ""
 
-    def run():
-        try:
-            result_holder["value"] = refine(original)
-        except Exception as e:
-            error_holder["error"] = e
+    console.print(f"  [dim]{icon} {tool_name}[/] [dim italic]{detail}[/]")
 
-    worker = threading.Thread(target=run, daemon=True)
-
-    messages = LOADING_MESSAGES.copy()
-    random.shuffle(messages)
-
-    with Live(console=console, refresh_per_second=10, transient=True) as live:
-        worker.start()
-        idx = 0
-        tick = 0
-        while worker.is_alive():
-            msg = messages[idx % len(messages)]
-            spinner = Spinner("dots", text=f"[bold cyan]  {msg}[/]")
-            live.update(spinner)
-            worker.join(timeout=10.0)
-            tick += 1
-            if tick >= 1:
-                idx += 1
-                tick = 0
-        worker.join()
-
-    if "error" in error_holder:
-        raise error_holder["error"]
-
-    return result_holder["value"]
+    if result.startswith("[거부됨]"):
+        console.print(f"  [dim red]{result}[/]")
 
 
 def main():
-    print_intro()
+    import argparse
+    parser = argparse.ArgumentParser(description="해동 코드 - 로컬 VL 코딩 에이전트")
+    parser.add_argument("--model", "-m", default=None, help="모델 ID (HuggingFace)")
+    parser.add_argument("--url", "-u", default=None,
+                        help="외부 API 서버 URL (미지정 시 내장 모델 사용)")
+    parser.add_argument("prompt", nargs="*", help="초기 프롬프트 (선택)")
+    args = parser.parse_args()
+
+    agent = Agent(model=args.model, base_url=args.url, confirm_fn=confirm_tool)
+
+    if agent.use_local:
+        # 내장 모델 모드: 모델 로드
+        console.print()
+        console.print("  [bold cyan]⟳[/] [dim]내장 모델을 준비하는 중...[/]")
+        console.print(f"  [dim]모델: {agent.model}[/]")
+        console.print(f"  [dim]최초 실행 시 모델 다운로드가 필요합니다 (~18GB)[/]")
+        console.print()
+
+        try:
+            with console.status("  [bold cyan]모델 로딩 중...[/]", spinner="dots"):
+                agent.load_model(
+                    on_status=lambda msg: None  # 스피너가 상태 표시
+                )
+        except ImportError:
+            console.print(
+                "\n  [bold red]✗ mlx-lm이 설치되지 않았습니다.[/]"
+                "\n  [dim]pip install mlx-lm 으로 설치하세요.[/]"
+                "\n  [dim]또는 --url 플래그로 외부 API 서버를 사용하세요.[/]\n"
+            )
+            sys.exit(1)
+        except Exception as e:
+            console.print(f"\n  [bold red]✗ 모델 로딩 실패:[/] {e}\n")
+            sys.exit(1)
+
+        mode = "내장 모델 (MLX)"
+    else:
+        # 외부 API 모드: 서버 연결 확인
+        if not agent.check_server():
+            console.print(
+                f"\n  [bold red]✗ API 서버에 연결할 수 없습니다.[/]"
+                f"\n  [dim]서버 주소: {agent.base_url}[/]"
+                f"\n  [dim]서버를 시작하거나 --url 없이 내장 모델을 사용하세요.[/]\n"
+            )
+            sys.exit(1)
+
+        # 외부 API 모드에서 모델 자동 선택
+        if not args.model:
+            models = agent.list_models()
+            if models:
+                agent.model = models[0]
+
+        mode = f"외부 API ({agent.base_url})"
+
+    print_intro(agent.model, mode)
+
+    # 초기 프롬프트
+    initial_prompt = " ".join(args.prompt) if args.prompt else None
 
     while True:
         try:
-            original = Prompt.ask("  [bold cyan]❯[/]")
-            if original.strip().lower() in ("q", "quit", "exit"):
+            if initial_prompt:
+                user_input = initial_prompt
+                console.print(f"  [bold cyan]❯[/] {user_input}")
+                initial_prompt = None
+            else:
+                user_input = Prompt.ask("  [bold cyan]❯[/]")
+
+            stripped = user_input.strip().lower()
+            if stripped in ("q", "quit", "exit"):
                 console.print("\n  [dim]👋 bye![/]\n")
                 break
-            if not original.strip():
+            if stripped == "/reset":
+                agent.reset()
+                console.print("  [dim]대화가 초기화되었습니다.[/]\n")
                 continue
-            try:
-                refined = refine_with_progress(original)
-            except Exception as e:
-                console.print(f"\n  [bold red]✗ 오류 발생:[/] {e}\n")
+            if stripped == "/model":
+                models = agent.list_models()
+                console.print(f"  [dim]현재 모델:[/] [bold]{agent.model}[/]")
+                if models:
+                    console.print(f"  [dim]사용 가능:[/] {', '.join(models)}")
+                console.print()
                 continue
-            display(original, refined)
+            if stripped.startswith("/model "):
+                new_model = user_input.strip()[7:].strip()
+                agent.model = new_model
+                agent.reset()
+                if agent.use_local:
+                    console.print(f"  [dim]모델 변경 중...[/]")
+                    try:
+                        with console.status("  [bold cyan]모델 로딩 중...[/]", spinner="dots"):
+                            agent.load_model()
+                    except Exception as e:
+                        console.print(f"  [bold red]✗ 모델 로딩 실패:[/] {e}\n")
+                        continue
+                console.print(f"  [dim]모델 변경:[/] [bold]{new_model}[/]\n")
+                continue
+            if not user_input.strip():
+                continue
 
-            # Opus 대화형 실행 — 터미널을 Claude에게 넘김
-            console.print("\n  [bold cyan]⚡ Opus 대화형 세션 시작[/]\n")
-            returncode = execute(refined)
-            if returncode != 0:
-                console.print(f"\n  [bold red]✗ Claude 종료 코드: {returncode}[/]\n")
-        except (KeyboardInterrupt, EOFError):
+            console.print()
+
+            # 스트리밍: Live 디스플레이로 마크다운 실시간 렌더링
+            response_chunks = []
+
+            with Live(console=console, refresh_per_second=8, vertical_overflow="visible") as live:
+                def on_text(chunk):
+                    response_chunks.append(chunk)
+                    accumulated = "".join(response_chunks)
+                    try:
+                        live.update(Markdown(accumulated))
+                    except Exception:
+                        live.update(accumulated)
+
+                response = agent.chat(
+                    user_input.strip(),
+                    on_text=on_text,
+                    on_tool=on_tool_use,
+                )
+
+            # 스트리밍이 아닌 경우 최종 마크다운 출력
+            if not agent._streamed:
+                console.print(Markdown(response))
+
+            console.print()
+
+        except KeyboardInterrupt:
             console.print("\n")
+            continue
+        except EOFError:
+            console.print("\n  [dim]👋 bye![/]\n")
             break
+        except Exception as e:
+            console.print(f"\n  [bold red]✗ 오류:[/] {e}\n")
 
 
 if __name__ == "__main__":

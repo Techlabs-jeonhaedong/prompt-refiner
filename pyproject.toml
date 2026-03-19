@@ -4,15 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "haedong"
-version = "0.1.0"
-description = "당신의 클로드 코드가 더 명료하게 일하도록 합니다"
+version = "0.2.0"
+description = "로컬 LLM 기반 코딩 에이전트 (Apple Silicon)"
 requires-python = ">=3.9"
 dependencies = [
     "rich>=13.0",
+    "requests>=2.28",
+    "mlx-lm>=0.22.0",
 ]
 
 [tool.setuptools]
-py-modules = ["main", "refiner"]
+py-modules = ["main", "agent", "tools", "backend", "refiner"]
 
 [project.scripts]
 haedong = "main:main"

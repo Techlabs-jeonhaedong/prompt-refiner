@@ -4,45 +4,60 @@ import json
 import re
 
 SYSTEM_PROMPT_BASE = """\
-너는 AI 코딩 에이전트에게 전달할 프롬프트를 개선하는 전문가야.
-사용자가 모호하게 입력한 지시를, AI 코딩 에이전트가 즉시 실행할 수 있는 구체적이고 명확한 프롬프트로 변환해.
+You are an expert at refining prompts for AI coding agents.
+Transform vague user instructions into specific, actionable prompts that an AI coding agent can execute immediately.
 
-## 핵심 원칙
+## Core Principles
 
-너에게는 프로젝트 소스코드를 분석할 수 있는 도구들이 있다.
-사용자의 모호한 지시를 받으면, 반드시 프로젝트 코드를 분석해서 다음을 특정해:
+You have tools to analyze the project source code.
+When you receive a vague instruction, you MUST analyze the project code to identify:
 
-1. **대상 파일 경로**: 어떤 파일을 수정해야 하는지
-2. **대상 심볼**: 어떤 함수, 클래스, 변수를 수정해야 하는지
-3. **구체적 변경 내용**: 무엇을 어떻게 바꿔야 하는지
-4. **관련 파일**: 변경 시 함께 확인해야 할 파일들
+1. **Target file paths**: Which files need to be modified
+2. **Target symbols**: Which functions, classes, or variables need to be modified
+3. **Related files**: Which files should be checked alongside the changes
 
-## 분석 전략 (도구 호출 최소화)
+## Analysis Strategy (Minimize Tool Calls)
 
-도구 호출 횟수를 최소화해. 턴 수가 제한되어 있으므로 낭비하지 마.
+Minimize the number of tool calls. Turns are limited — do not waste them.
 
-1. **Grep 1회로 관련 파일 목록을 확보해.** (예: "카카오 로그인 제거" → Grep으로 "kakao" 검색)
-2. **Grep 결과의 파일 경로 목록만으로 프롬프트를 작성할 수 있으면, Read 없이 바로 작성해.**
-3. **Read는 꼭 필요한 파일 1~2개만.** 모든 파일을 읽으려 하지 마.
+1. **Use a single Grep call to find relevant files.** (e.g., "remove Kakao login" → Grep for "kakao")
+2. **If the file path list from Grep is sufficient to write the prompt, skip Read entirely.**
+3. **Only Read 1-2 files when absolutely necessary.** Do not attempt to read every file.
 
-## 프롬프트 작성 규칙
+## Prompt Writing Rules
 
-- 모호한 표현 제거: "좀", "뭔가", "약간", "대충", "그런 거" 등
-- 구체적 동사 사용: "해줘" → "구현해줘", "고쳐줘" → "수정해줘"
-- 복합 요청은 번호로 분리
-- 파일 경로는 프로젝트 루트 기준 상대 경로로 표기
+- Eliminate vague expressions: "kind of", "something like", "sort of", "roughly", "that thing", etc.
+- Use specific verbs: "do it" → "implement", "fix it" → "modify the return value of"
+- Split compound requests into numbered steps
+- Use relative paths from the project root for all file paths
+- Transform every ambiguous instruction into a precise, unambiguous sentence. \
+Each sentence must clearly state WHAT to do, WHERE to do it, and the expected RESULT. \
+Example: "make the button nicer" → "Change the background color of the submit button in src/components/LoginForm.tsx to #3B82F6 (blue-500) and increase the border-radius to 8px"
 
-## 출력 형식 (최우선 규칙 - 반드시 준수)
+## Strict Prohibitions
 
-반드시 <REFINED> 태그 안에 개선된 프롬프트만 넣어서 출력해.
-태그 바깥에는 아무것도 출력하지 마. 분석 과정, 설명, 인사, 요약, 구분선 전부 금지.
+- **NEVER include source code in the output.** Do not show code snippets, diffs, before/after code examples, or implementation details. \
+The refined prompt must describe WHAT to change in natural language, not HOW to write the code.
+- **NEVER use code blocks (``` ```) in the output.**
 
-출력 형식:
+## Output Format (Highest Priority Rule — MUST Follow)
+
+You MUST output only the refined prompt inside <REFINED> tags.
+Output NOTHING outside the tags. No analysis, no explanations, no greetings, no summaries, no separators.
+
+The output MUST follow this structure:
+1. **File list**: Start with "## 수정 대상 파일" followed by a bullet list of all files that need modification
+2. **Instructions**: Then list the specific changes as numbered steps in natural language
+
+Output format:
 <REFINED>
-(여기에 개선된 프롬프트 텍스트만)
-</REFINED>
+## 수정 대상 파일
+- path/to/file1.py
+- path/to/file2.ts
 
-태그 안의 첫 줄은 반드시 수정 대상 파일 경로로 시작해야 해.
+1. (specific instruction in natural language — no code)
+2. (specific instruction in natural language — no code)
+</REFINED>
 """
 
 BASE_TOOLS = ["Read", "Glob", "Grep"]
@@ -225,3 +240,67 @@ def execute(refined_prompt: str) -> int:
         cwd=cwd,
     )
     return proc.returncode
+
+
+def execute_turn_streaming(prompt: str, session_id: str = None,
+                           on_text=None, on_tool=None):
+    """스트리밍 모드로 단일 대화 턴 실행.
+
+    Args:
+        prompt: 사용자 프롬프트
+        session_id: 이전 세션 ID (대화 이어가기용)
+        on_text: 텍스트 청크 콜백 fn(str)
+        on_tool: 도구 사용 콜백 fn(tool_name: str)
+
+    Returns:
+        (전체 응답 텍스트, 세션 ID) 튜플
+    """
+    cwd = os.getcwd()
+    cmd = [
+        "claude", "-p", "--verbose",
+        "--output-format", "stream-json",
+        "--dangerously-skip-permissions",
+        "--model", "opus",
+        "--max-turns", str(MAX_TURNS),
+    ]
+    if session_id:
+        cmd.extend(["--resume", session_id])
+    cmd.append(prompt)
+
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, cwd=cwd, bufsize=1,
+    )
+
+    full_text = []
+    new_session_id = None
+
+    for line in iter(proc.stdout.readline, ''):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        etype = event.get("type")
+        if etype == "assistant":
+            subtype = event.get("subtype")
+            if subtype == "text":
+                text = event.get("text", "")
+                full_text.append(text)
+                if on_text:
+                    on_text(text)
+            elif subtype == "tool_use":
+                if on_tool:
+                    on_tool(event.get("tool_name", "unknown"))
+        elif etype == "result":
+            new_session_id = event.get("session_id")
+
+    proc.wait()
+    if proc.returncode != 0:
+        stderr = proc.stderr.read()
+        raise RuntimeError(f"Claude 실행 실패: {stderr}")
+
+    return "".join(full_text), new_session_id
